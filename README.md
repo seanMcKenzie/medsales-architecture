@@ -10,6 +10,7 @@ Architecture documentation for the Medical Sales Intelligence & CRM Platform.
 | [Component Diagram](component-diagram.md) | Application components, domain services, API endpoints |
 | [Data Architecture](data-architecture.md) | Database schema, ingestion pipeline, caching, backup |
 | [Deployment Architecture](deployment-architecture.md) | AWS infrastructure, Docker, CI/CD, monitoring, DR |
+| [Geocoding Service](geocoding-service.md) | Dedicated geocoding microservice — multi-provider, caching, batch processing, cost optimization |
 
 ## Architecture Decision Records
 

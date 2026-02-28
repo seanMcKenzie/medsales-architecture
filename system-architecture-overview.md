@@ -162,7 +162,8 @@ graph TB
 | **Physician Database** | PostgreSQL 16 + PostGIS 3.4 | Physician master data, geospatial queries |
 | **CRM Database** | PostgreSQL 16 | Multi-tenant CRM data (calls, tasks, pipeline) |
 | **Cache** | Redis 7.x Cluster | Session management, query caching, rate limiting |
-| **Data Ingestion** | Spring Batch | CMS file download, parsing, loading, geocoding |
+| **Data Ingestion** | Spring Batch | CMS file download, parsing, loading |
+| **Geocoding Service** | Spring Boot (standalone) | Address → lat/lng conversion; multi-provider (Google, Mapbox, Census); Redis cache; see [Geocoding Service](geocoding-service.md) |
 | **Job Queue** | Amazon SQS or RabbitMQ | Async job processing (notifications, exports, ingestion) |
 | **Object Storage** | Amazon S3 | Raw CMS files, CSV exports, backups |
 | **CDN** | CloudFront | Static assets, mobile app bundles |
@@ -181,6 +182,7 @@ Detailed Architecture Decision Records are maintained in the `/adr` directory:
 - **[ADR-001](adr/ADR-001-database.md)** — PostgreSQL + PostGIS as primary database
 - **[ADR-002](adr/ADR-002-search.md)** — Search strategy (PostGIS + pg_trgm for v1, Elasticsearch for v2)
 - **[ADR-003](adr/ADR-003-mobile.md)** — React Native for cross-platform mobile
+- **[Geocoding Service](geocoding-service.md)** — Dedicated geocoding microservice (multi-provider, caching, batch processing)
 
 ---
 
