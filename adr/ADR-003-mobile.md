@@ -1,103 +1,126 @@
-# ADR-003: Mobile Approach — React Native vs Flutter vs Native
+# ADR-003: React Native for Cross-Platform Mobile Development
 
-**Date:** 2026-02-28
-**Status:** Accepted
-**Author:** Frank Reynolds
+**Date:** 2026-02-28  
+**Status:** Accepted  
+**Author:** Frank Reynolds, DevOps & Solutions Architect
 
 ## Context
 
-MedSales is mobile-first. Requirements:
-- iOS (16+) and Android (12+) simultaneously
-- GPS location services for nearby search and mapping
-- Offline mode (cached profiles, offline call logging, sync on reconnect)
-- Push notifications for task reminders
-- Map view with 500+ physician pins
-- App Store and Play Store compliant (NFR-029)
-- Camera access not required for v1
-- No AR, Bluetooth, or hardware-intensive features
+The platform requires a mobile-first application for iOS and Android with the following requirements:
 
-Team context: Spring Boot backend team (Java). No existing mobile team.
+1. **GPS location access** for nearby physician search and map display
+2. **Push notifications** for task reminders
+3. **Offline mode** — view cached profiles and log calls without connectivity
+4. **Map rendering** with color-coded pins (up to 500 visible)
+5. **App Store / Play Store** distribution
+6. **Performance:** 2-second profile loads on 4G, 2-second map rendering for 500 pins
 
-Options:
-1. **React Native** — JavaScript/TypeScript, shared codebase, native bridge
-2. **Flutter** — Dart, shared codebase, custom rendering engine
-3. **Native (Swift + Kotlin)** — Two separate codebases
+The web companion app (for managers/admins) is a separate React SPA — not part of this decision.
+
+### Options Considered
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **Native (Swift + Kotlin)** | Best performance; full platform API access; best UX polish | Two codebases; 2x engineering effort; harder to keep in sync |
+| **React Native** | Single codebase; 90%+ code sharing; large ecosystem; native modules when needed; strong community | Bridge overhead on heavy computation; occasional native module compatibility issues; debugging can be harder |
+| **Flutter** | Single codebase; excellent performance (Dart compiles to native); great UI toolkit | Smaller ecosystem than RN; Dart developer pool is smaller; less mature enterprise adoption |
+| **Ionic / Capacitor** | Web-based; fastest time-to-market; one codebase | WebView performance limits; map rendering and GPS access less reliable; offline mode harder; App Store review risk |
+| **PWA** | No app store; instant updates; one codebase | No push on iOS (limited); poor offline; no GPS background; doesn't feel native; users expect app store presence |
 
 ## Decision
 
-**React Native** for iOS and Android from a single codebase.
+**React Native** for cross-platform mobile development (iOS + Android from a single codebase).
 
-### Comparison
+Key reasons:
 
-| Criterion | React Native | Flutter | Native (Swift/Kotlin) |
-|---|---|---|---|
-| Code sharing | ~90% shared | ~95% shared | 0% shared |
-| Development speed | ✅ Fast, single team | ✅ Fast, single team | ❌ Two teams needed |
-| Hiring pool | ✅ Large (JS/TS devs) | ⚠️ Growing (Dart devs) | ⚠️ Specialized per platform |
-| Maps / geo support | ✅ react-native-maps (mature) | ✅ google_maps_flutter | ✅ Native MapKit / Google Maps |
-| Offline / SQLite | ✅ WatermelonDB, Realm, SQLite | ✅ Hive, sqflite | ✅ Core Data, Room |
-| Push notifications | ✅ Firebase + native | ✅ Firebase + native | ✅ Native |
-| GPS location | ✅ react-native-geolocation | ✅ geolocator | ✅ Native |
-| Performance (500 pins) | ✅ Adequate (clustered) | ✅ Good | ✅ Best |
-| App Store compliance | ✅ Proven | ✅ Proven | ✅ Native |
-| Hot reload / dev speed | ✅ Yes | ✅ Yes | ❌ No |
-| Backend integration | ✅ REST/JSON natural | ✅ REST/JSON natural | ✅ REST/JSON natural |
-| Long-term maintenance | ✅ 1 codebase | ✅ 1 codebase | ❌ 2 codebases |
+1. **Code sharing:** 90%+ shared code between iOS and Android reduces engineering effort significantly vs. native. For a startup/early-stage product, this is the right trade-off.
 
-### Why React Native Over Flutter
+2. **Map performance:** React Native Maps (`react-native-maps`) wraps native Apple Maps (iOS) and Google Maps (Android) — this is a native component, not a WebView. 500 pins with clustering is well within its capability.
 
-1. **Hiring.** JavaScript/TypeScript developers are everywhere. Dart developers are not. For a startup/small team, this matters. A lot.
+3. **Offline support:** Libraries like WatermelonDB or SQLite via `react-native-sqlite-storage` provide robust local database support for offline caching and sync queuing.
 
-2. **Ecosystem maturity.** React Native has been in production at Meta, Microsoft, Shopify, and Discord since 2015. The mapping, offline, and geo libraries are battle-tested. Flutter is mature too, but RN's ecosystem for our specific needs (maps, offline sync, forms) is deeper.
+4. **GPS / Location:** `react-native-geolocation-service` provides full GPS access including background location (if needed later for route tracking).
 
-3. **Web companion synergy.** Phase 3 includes a web companion app for managers. React Native + React Web share component patterns, state management (Redux/Zustand), and developer knowledge. Flutter web exists but is less mature for business apps.
+5. **Push notifications:** Firebase Cloud Messaging integration via `@react-native-firebase/messaging` is mature and well-documented.
 
-4. **Spring Boot team alignment.** The backend team knows Java, not Dart. JavaScript is a shorter learning curve if backend devs need to contribute to mobile.
+6. **Developer availability:** React Native developers are more available and less expensive than native iOS+Android specialists. The web team (React SPA) shares significant knowledge with the mobile team.
 
-### Why Not Native
+7. **Performance:** React Native's new architecture (Fabric renderer, JSI, Hermes engine) provides near-native performance for the UI patterns in this app (lists, profiles, maps, forms).
 
-1. **Cost.** Two codebases means two teams, double the bugs, double the testing, double the release cycles. For a v1 product without hardware-intensive features, this is waste.
+### Technology Stack
 
-2. **Speed.** React Native ships both platforms in one development cycle. Native means iOS ships first, Android catches up 3–6 months later, or vice versa.
-
-3. **MedSales doesn't need native performance.** We're displaying lists, maps, forms, and profiles. This is not a game or video editor. React Native handles this workload easily.
-
-## Key Libraries
-
-| Need | Library |
-|---|---|
-| Navigation | React Navigation |
-| Maps | react-native-maps (Google Maps provider) |
-| GPS | @react-native-community/geolocation |
-| Offline storage | WatermelonDB (SQLite-backed, sync support) |
-| Push notifications | @react-native-firebase/messaging |
-| State management | Zustand or Redux Toolkit |
-| HTTP client | Axios or React Query |
+| Concern | Library |
+|---------|---------|
+| Framework | React Native 0.75+ (New Architecture) |
+| JS Engine | Hermes (default) |
+| Navigation | React Navigation 7.x |
+| State Management | Redux Toolkit + RTK Query |
+| Maps | react-native-maps |
+| GPS | react-native-geolocation-service |
+| Offline DB | WatermelonDB (SQLite-backed) |
+| Push | @react-native-firebase/messaging |
+| Networking | Axios + RTK Query |
 | Forms | React Hook Form |
-| UI components | React Native Paper or NativeBase |
+| UI Components | React Native Paper or custom |
+| Testing | Jest + React Native Testing Library + Detox (E2E) |
+| CI/CD | Fastlane + GitHub Actions |
+| OTA Updates | CodePush (Microsoft) or EAS Update (Expo) |
+
+### Offline Architecture
+
+```mermaid
+graph TD
+    subgraph "Mobile App"
+        UI[React Native UI]
+        STORE[Redux Store<br>In-Memory State]
+        SYNC[Sync Engine]
+        LOCAL[(WatermelonDB<br>SQLite)]
+    end
+
+    subgraph "Backend"
+        API[Spring Boot API]
+    end
+
+    UI --> STORE
+    STORE --> SYNC
+    SYNC --> LOCAL
+    SYNC -->|Online| API
+    LOCAL -->|Offline reads| UI
+    
+    Note1[Writes queue locally<br>Sync when online]
+    Note2[Profiles cached on view<br>Last 100 physicians]
+```
+
+**Offline capabilities (NFR-026):**
+- View last 100 accessed physician profiles (cached in WatermelonDB)
+- Log call notes (queued in local DB, synced on reconnect)
+- View today's task list (cached)
+- Conflict resolution: last-write-wins with server timestamp; conflicts flagged for user review
 
 ## Consequences
 
 ### Positive
-- Single codebase, single team, ship both platforms simultaneously
-- Large hiring pool (JS/TS)
-- Proven at scale (Meta, Shopify, Discord)
-- Synergy with Phase 3 React web app
-- Faster v1 delivery
+- Single codebase for iOS + Android — faster feature development
+- Shared React knowledge with web team
+- Native map rendering (not WebView) — good performance for pin display
+- Mature ecosystem for all platform requirements (GPS, push, offline, maps)
+- OTA update capability (CodePush) — deploy bug fixes without App Store review
+- Cost-effective: ~1.5x one native team vs. 2x for dual native
 
 ### Negative
-- Not truly native — occasional platform-specific bugs or UX differences
-- Map performance with 500+ pins requires clustering optimization
-- Offline sync (WatermelonDB) adds complexity vs simple native Core Data/Room
-- React Native major version upgrades can be painful (though much improved since New Architecture)
-- Some native modules may require Swift/Kotlin bridge code
+- Performance ceiling is lower than pure native for computationally intensive tasks — not a concern for this app's use cases (data display, forms, maps)
+- Native module debugging requires platform-specific knowledge (Xcode, Android Studio)
+- React Native upgrades can be painful (improved with New Architecture but still a consideration)
+- Some edge cases in map clustering with 500+ pins may need native optimization
 
-### Mitigations
-- Use React Native New Architecture (Fabric + TurboModules) from day one
-- Implement map pin clustering to handle 500+ pins (supercluster library)
-- Budget 2 weeks for offline sync architecture with WatermelonDB
-- Set up Detox for E2E testing on both platforms
+### Risks
+- **App Store rejection:** React Native apps are accepted by both stores; CodePush is allowed as long as app functionality doesn't fundamentally change via OTA
+- **Performance on older devices:** Target iOS 16+ and Android 12+ (2021+ devices) mitigates most performance concerns
+- **Map rendering lag:** If 500 pins cause jank, implement map clustering (react-native-map-clustering) to reduce rendered elements
 
----
-
-*React Native. One codebase. Two platforms. I'm not paying for two teams when one team can do the job. That's just business. — Frank*
+## Follow-Up
+- Set up React Native project with New Architecture enabled from start
+- Benchmark map rendering with 500 pins on target minimum devices (iPhone 12, mid-range Android)
+- Implement WatermelonDB schema matching the offline data requirements
+- Set up Fastlane for automated App Store and Play Store submissions
+- Configure CodePush for OTA update delivery

@@ -1,63 +1,64 @@
-# ADR-001: PostgreSQL + PostGIS for Physician Database
+# ADR-001: PostgreSQL + PostGIS as Primary Database
 
-**Date:** 2026-02-28
-**Status:** Accepted
-**Author:** Frank Reynolds
+**Date:** 2026-02-28  
+**Status:** Accepted  
+**Author:** Frank Reynolds, DevOps & Solutions Architect
 
 ## Context
 
-MedSales requires a primary datastore for ~5M physician records with:
-- Geospatial queries (radius search, nearby, territory polygons)
-- Complex joins across 10+ CMS source tables linked by NPI
-- Multi-tenant CRM data with row-level isolation
-- Full-text search on names and organizations
-- Capacity for 10M+ records and 100M+ CRM entries
-- Sub-second query performance for mobile API
+The Medical Sales Intelligence Platform requires a database that can:
 
-Options considered:
-1. **PostgreSQL + PostGIS** — Relational + geospatial in one engine
-2. **MySQL + separate geo service** — Relational, limited native geo support
-3. **MongoDB + geo indexes** — Document store with 2dsphere indexes
-4. **PostgreSQL + Elasticsearch** — Relational for storage, ES for search
+1. Store ~5 million physician records with rich multi-source data joins
+2. Support geospatial queries (radius search: "show me all cardiologists within 10 miles")
+3. Handle complex multi-criteria filtering across 10+ data dimensions
+4. Support multi-tenant CRM data with row-level security
+5. Scale to 10,000 concurrent users with sub-3-second search response times
+6. Handle batch ingestion of 8-10 GB CSV files without impacting read performance
+
+### Options Considered
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **PostgreSQL + PostGIS** | Mature, proven at scale; native geospatial with PostGIS; ACID compliance; rich indexing (B-tree, GIN, GiST, pg_trgm); RLS for multi-tenancy; excellent tooling; managed options (RDS, Cloud SQL) | Single-node write bottleneck; geospatial + full-text combo queries may need tuning |
+| **MySQL + spatial** | Familiar; managed options | Weaker spatial support; no native pg_trgm equivalent; no RLS |
+| **MongoDB** | Flexible schema; native geospatial; horizontal sharding | No ACID across collections; schema flexibility is a liability for structured CMS data; harder to do complex joins |
+| **DynamoDB** | Serverless scaling; managed | Terrible for ad-hoc queries; no geospatial; no joins; would need complete redesign of query patterns |
+| **Elasticsearch (primary)** | Excellent search + geo; fast faceted queries | Not a system of record; no ACID; complex to manage; data loss risk |
 
 ## Decision
 
-**PostgreSQL 16 + PostGIS 3.4** as the sole primary datastore for v1.
+**PostgreSQL 16 with PostGIS 3.4** as the primary database for both physician intelligence data and CRM data.
 
-### Rationale
-
-1. **Geospatial is first-class.** PostGIS `ST_DWithin()` with GIST indexes on geography handles sub-second radius queries on 5M+ points. This is proven at much larger scale (OpenStreetMap runs on PostGIS).
-
-2. **Relational model fits the data.** Physician data is inherently relational — one NPI joins to addresses, taxonomies, Part B services, Part D drugs, Open Payments, hospital affiliations. PostgreSQL handles these joins efficiently with proper indexing.
-
-3. **Multi-tenancy via RLS.** PostgreSQL Row-Level Security provides org-level CRM data isolation without application-level filtering bugs. One policy, enforced at the database layer.
-
-4. **Text search built in.** `pg_trgm` extension provides fuzzy name search without a separate search engine. Good enough for v1.
-
-5. **Spring Boot ecosystem.** Spring Data JPA + Hibernate Spatial have mature PostGIS support. No custom drivers or adapters needed.
-
-6. **Operational simplicity.** One database engine to operate, backup, monitor, and tune. Adding Elasticsearch or MongoDB doubles the operational surface for questionable v1 benefit.
-
-7. **Proven at scale.** PostGIS handles planetary-scale geodata. 5M physician records is a rounding error.
+Key reasons:
+- **PostGIS** provides production-grade geospatial indexing (`ST_DWithin`, `GIST` indexes) that handles radius queries on 5M+ points with sub-second performance
+- **pg_trgm** extension provides fuzzy text search on physician names without a separate search engine
+- **Row-Level Security (RLS)** provides database-enforced multi-tenant isolation for CRM data
+- **Table partitioning** handles large datasets like Part B (250M rows) efficiently — partition by data_year
+- **Read replicas** handle read-heavy physician queries while primary handles CRM writes
+- **Managed hosting** (AWS RDS) reduces operational burden with automated backups, failover, patching
+- **Cost-effective** — no per-query licensing; predictable instance-based pricing
+- The team has Spring Boot + JPA + PostgreSQL experience — no ramp-up time
 
 ## Consequences
 
 ### Positive
-- Single datastore — simpler ops, simpler debugging, simpler backups
-- PostGIS spatial performance meets all NFRs
-- RLS provides strong multi-tenant isolation
-- Mature Spring Boot integration
-- Team familiarity — everyone knows PostgreSQL
+- Single database technology to manage (reduced ops complexity)
+- Strong consistency guarantees for CRM data
+- Proven at this scale (5M records is well within PostgreSQL comfort zone)
+- Rich ecosystem: pgAdmin, pg_dump, logical replication, etc.
+- PostGIS is the industry standard for geospatial data
 
 ### Negative
-- Complex multi-attribute search (geo + specialty + drug + procedure + payments) may slow down with highly combinatorial queries at scale — monitor and consider Elasticsearch in v2 (see ADR-002)
-- PostgreSQL `pg_trgm` is "good enough" text search, not "great" text search — no relevance scoring, no synonyms, no fuzzy phonetic matching
-- Vertical scaling has limits — if we outgrow a single writer, we need read replicas or sharding (unlikely at 5M records)
+- If search query patterns become very complex (10+ filter dimensions with full-text + geo), we may need Elasticsearch as a secondary search layer (see ADR-002)
+- Write scaling is vertical (bigger instance) not horizontal — acceptable for our write volume
+- Batch ingestion of 8 GB files requires careful transaction management to avoid table bloat; use staging tables + COPY + upsert pattern
 
 ### Risks
-- NPPES full reload (8GB) under 4 hours requires careful batch tuning — use `COPY` command, disable indexes during load, rebuild after
-- Geocode columns add storage overhead (~40 bytes/row × 5M = ~200MB — negligible)
+- Part B table at 250M rows needs partitioning from day one — cannot retrofit easily
+- Geocoded data doubles index size; budget for ~100 GB of indexes on physician data
+- Connection pooling (PgBouncer) needed at 10,000 concurrent users
 
----
-
-*PostgreSQL does the job. It's done the job for 30 years. I'm not gonna overthink this. — Frank*
+## Follow-Up
+- Implement connection pooling (PgBouncer or RDS Proxy) from launch
+- Partition Part B and Part D tables by `data_year`
+- Monitor query performance; if multi-criteria search exceeds 3s p95, evaluate Elasticsearch (ADR-002)

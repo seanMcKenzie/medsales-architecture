@@ -1,95 +1,121 @@
-# ADR-002: Search Infrastructure — PostGIS vs Elasticsearch
+# ADR-002: Search Strategy — PostGIS + pg_trgm for v1, Elasticsearch for v2
 
-**Date:** 2026-02-28
-**Status:** Accepted
-**Author:** Frank Reynolds
+**Date:** 2026-02-28  
+**Status:** Accepted  
+**Author:** Frank Reynolds, DevOps & Solutions Architect
 
 ## Context
 
-MedSales search requirements include:
-- **Geographic radius search** (physicians within X miles of a point)
-- **Specialty filtering** (single or multi-select)
-- **Name search** (fuzzy match on physician/org names)
-- **Procedure volume filtering** (Part B HCPCS code + minimum threshold)
-- **Drug prescribing filtering** (Part D drug name + minimum claims)
-- **Open Payments filtering** (by company, amount, payment nature)
-- **Combined multi-attribute queries** (geo + specialty + drug + payments simultaneously)
-- **Sorting** by distance, billing volume, prescribing volume, payments
+The platform requires sophisticated search capabilities:
 
-Target: 5M physician records, <3 second response for radius queries, 10K concurrent users.
+1. **Geospatial:** Find physicians within X miles of a GPS coordinate
+2. **Full-text:** Search by physician name, organization name
+3. **Faceted filtering:** Filter by specialty, credential, gender, Medicare assignment, telehealth
+4. **Aggregate filtering:** Filter by Part B procedure volume, Part D drug prescribing volume, Open Payments total
+5. **Sorting:** By distance, name, billing volume, payment total
+6. **Performance:** Results in < 3 seconds for radius queries up to 50 miles
 
-Options:
-1. **PostGIS only** — PostgreSQL spatial + `pg_trgm` for all search
-2. **Elasticsearch only** — All data synced to ES, queries go through ES
-3. **PostGIS + Elasticsearch hybrid** — PostgreSQL for storage/CRM, ES for search
+These search dimensions span multiple tables (physician, physician_address, physician_taxonomy, physician_cms_profile, partb_service, partd_drug, open_payments_general).
+
+### Options Considered
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **PostgreSQL only (PostGIS + pg_trgm)** | No additional infrastructure; consistent data; simpler ops | Complex multi-table joins may slow down; limited faceted search support |
+| **Elasticsearch only** | Best-in-class search + geo + facets + aggregations | Not a system of record; data sync complexity; eventual consistency; additional infra cost |
+| **PostgreSQL primary + Elasticsearch secondary** | Best of both worlds; PG for ACID, ES for search | Data sync pipeline; two systems to maintain; added complexity |
+| **Typesense / Meilisearch** | Simpler than ES; good search UX | Less mature geo support; smaller ecosystem |
 
 ## Decision
 
-**PostGIS only for v1. Evaluate Elasticsearch for v2 if performance degrades under production load.**
+**Phase 1 (MVP):** PostgreSQL with PostGIS + pg_trgm handles all search. No Elasticsearch.
 
-### Why PostGIS for v1
+**Phase 2 (if needed):** Add Elasticsearch as a read-only search index if PostgreSQL search performance degrades under production load with complex multi-criteria queries.
 
-| Criterion | PostGIS | Elasticsearch |
-|---|---|---|
-| Radius search on 5M points | ✅ Sub-second with GIST index | ✅ Sub-second with geo_point |
-| Multi-table joins (NPI key) | ✅ Native SQL joins | ❌ Requires denormalization |
-| Fuzzy name search | ⚠️ pg_trgm (adequate) | ✅ Excellent (analyzers, fuzzy) |
-| Combined geo + attribute filter | ⚠️ Complex queries, adequate perf | ✅ Designed for this |
-| Operational complexity | ✅ Already running PostgreSQL | ❌ Additional cluster to manage |
-| Data consistency | ✅ Single source of truth | ❌ Sync lag, eventual consistency |
-| Spring Boot integration | ✅ JPA + Hibernate Spatial | ✅ Spring Data Elasticsearch |
-| v1 timeline impact | ✅ No additional setup | ❌ 2–4 weeks additional work |
+### Phase 1 Implementation
 
-**The deciding factors:**
+```sql
+-- Geospatial radius search
+SELECT p.npi, p.last_name, p.first_name, 
+       ST_Distance(a.geom, ST_MakePoint(:lng, :lat)::geography) AS distance_meters
+FROM physician p
+JOIN physician_address a ON p.npi = a.npi
+JOIN physician_taxonomy t ON p.npi = t.npi
+WHERE a.address_purpose = 'LOCATION'
+  AND ST_DWithin(a.geom, ST_MakePoint(:lng, :lat)::geography, :radius_meters)
+  AND t.taxonomy_desc = :specialty
+  AND t.is_primary = TRUE
+ORDER BY distance_meters
+LIMIT 500;
 
-1. PostGIS handles every v1 query pattern. The question isn't "can it?" — it's "will it at 10K concurrent users with complex filters?" For v1 launch traffic, the answer is yes.
+-- Full-text name search with trigram similarity
+SELECT p.npi, p.last_name, p.first_name,
+       similarity(p.last_name || ' ' || p.first_name, :query) AS score
+FROM physician p
+WHERE (p.last_name || ' ' || p.first_name) % :query
+ORDER BY score DESC
+LIMIT 50;
 
-2. Adding Elasticsearch for v1 means syncing 5M records + 10 child tables into a denormalized ES index, building a sync pipeline, handling consistency, and operating an ES cluster. That's a month of work for marginal v1 benefit.
-
-3. We can add ES later without rearchitecting. PostgreSQL remains the source of truth regardless. ES is an additive optimization, not a foundational change.
-
-### When to Add Elasticsearch (v2 Triggers)
-
-Add Elasticsearch when any of these occur:
-- P95 search latency exceeds 3s for combined geo + multi-attribute queries
-- Users report slow search performance consistently
-- Faceted search / aggregation requirements emerge (e.g., "show me specialty distribution in this radius")
-- Full-text search quality complaints (synonyms, phonetic matching, relevance ranking)
-
-### ES v2 Architecture (if triggered)
-
+-- Aggregate filter: physicians prescribing drug X with >= N claims
+SELECT p.npi, p.last_name, p.first_name, SUM(d.total_claims) AS total_claims
+FROM physician p
+JOIN partd_drug d ON p.npi = d.npi
+WHERE d.generic_name ILIKE :drug_name
+  AND d.data_year = :year
+GROUP BY p.npi, p.last_name, p.first_name
+HAVING SUM(d.total_claims) >= :min_claims
+ORDER BY total_claims DESC;
 ```
-PostgreSQL (source of truth)
-    │
-    ├── CDC (Debezium) or scheduled sync
-    │
-    ▼
-Elasticsearch Cluster
-    ├── physician_search index (denormalized)
-    │   ├── NPI, name, specialty, location (geo_point)
-    │   ├── Part B top procedures (nested)
-    │   ├── Part D top drugs (nested)
-    │   ├── Open Payments summary (nested)
-    │   └── CRM status (last contact, priority)
-    │
-    └── Search API queries ES
-        └── Detail/CRM queries still hit PostgreSQL
+
+### Phase 2 Trigger Criteria
+
+Move to Elasticsearch if **any** of these occur:
+- Physician search p95 latency > 3 seconds under production load
+- Multi-criteria queries (geo + specialty + Part B filter + Part D filter) consistently > 5 seconds
+- Users request faceted counts (e.g., "show me how many results per specialty") which are expensive in SQL
+- Search query volume exceeds 1,000 queries/second sustained
+
+### Phase 2 Architecture (if triggered)
+
+```mermaid
+graph LR
+    subgraph "Write Path"
+        API[API] --> PG[(PostgreSQL<br>Source of Truth)]
+        WORKER[Ingestion Worker] --> PG
+    end
+
+    subgraph "Sync"
+        PG -->|CDC / Debezium| KAFKA[Kafka Connect]
+        KAFKA --> ES[(Elasticsearch)]
+    end
+
+    subgraph "Read Path"
+        SEARCH[Search Queries] --> ES
+        PROFILE[Profile Queries] --> PG
+    end
 ```
 
 ## Consequences
 
 ### Positive
-- Faster v1 delivery — no ES cluster to build and maintain
-- Simpler architecture — one data engine
-- No sync consistency issues
-- Lower infrastructure cost for v1
+- Phase 1 is simpler: one database, no sync pipeline, no eventual consistency issues
+- PostGIS geospatial performance is proven at 5M+ records with proper indexing
+- pg_trgm handles physician name search well for the fuzzy matching use case
+- Delays Elasticsearch operational complexity until it's actually needed
+- Saves ~$300-500/month in infrastructure costs for Phase 1
 
 ### Negative
-- Complex combined searches may be slower than ES equivalent
-- No faceted aggregations (count by specialty in radius)
-- Text search quality limited to `pg_trgm` capabilities
-- If ES is needed for v2, it's a significant engineering effort (denormalization + sync pipeline)
+- Complex multi-table joins (geo + specialty + Part B volume + Part D drug) will need careful query optimization and possibly materialized views
+- No faceted search counts without Elasticsearch (acceptable for MVP)
+- If Elasticsearch is needed in Phase 2, retrofitting the sync pipeline is non-trivial (~2-3 weeks engineering)
 
----
+### Mitigations
+- Create materialized views for common search patterns (e.g., physician summary with top specialties, total billing, total payments)
+- Refresh materialized views on data ingestion schedule (not real-time)
+- Index aggressively on filter columns
+- Use Redis caching for repeated search patterns (15-min TTL)
 
-*Look — I'm not adding another cluster to manage unless I have to. PostGIS handles it. If it doesn't, we add Elasticsearch later. That's the scheme. — Frank*
+## Follow-Up
+- Benchmark search queries against production-scale data (5M physicians, 250M Part B rows) during development
+- Set up CloudWatch custom metrics for search latency (p50, p95, p99)
+- Document the Phase 2 Elasticsearch migration plan so it's ready when needed
